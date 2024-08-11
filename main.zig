@@ -15,8 +15,8 @@ pub fn main() !void {
     var zag = Zigzag.init(allocator);
 
     //try zag.GET("/", handleGet);
-    try zag.GETStatic("/", "public/index.html");
-    try zag.GETStatic("/style.css", "public/style.css");
+    // try zag.GETStatic("/", "public/index.html");
+    // try zag.GETStatic("/style.css", "public/style.css");
 
     try zag.start(.{ 127, 0, 0, 1 }, 8080);
 }

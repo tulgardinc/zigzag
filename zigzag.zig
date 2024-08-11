@@ -6,7 +6,7 @@ const Methods = @import("http_request.zig").Methods;
 const HTTPResponse = @import("http_response.zig").HTTPResponse;
 const ResponseCode = @import("http_response.zig").ResponseCode;
 const Handler = @import("handler.zig").Handler;
-const staticHandler = @import("handler.zig").staticHandler;
+const h = @import("handler.zig");
 
 pub const Zigzag = struct {
     allocator: std.mem.Allocator,
@@ -29,12 +29,21 @@ pub const Zigzag = struct {
         try self.openSocket(ip_address, port);
     }
 
-    pub fn GETStatic(self: *Self, url: []const u8, comptime path: []const u8) !void {
+    pub fn ServeFile(self: *Self, url: []const u8, comptime path: []const u8) !void {
         const result = try self.handlers.getOrPut(.GET);
         if (!result.found_existing) {
             result.value_ptr.* = std.StringHashMap(Handler).init(self.allocator);
         }
-        const handler = staticHandler(self.allocator, path);
+        const handler = h.fileHandler(self.allocator, path);
+        try result.value_ptr.put(url, handler);
+    }
+
+    pub fn ServeDir(self: *Self, url: []const u8, comptime path: []const u8) !void {
+        const result = try self.handlers.getOrPut(.GET);
+        if (!result.found_existing) {
+            result.value_ptr.* = std.StringHashMap(Handler).init(self.allocator);
+        }
+        const handler = h.fileHandler(self.allocator, path);
         try result.value_ptr.put(url, handler);
     }
 
@@ -47,6 +56,10 @@ pub const Zigzag = struct {
         try result.value_ptr.put(url, handler);
     }
 
+    pub fn Response404(self: *Self) HTTPResponse {
+        return HTTPResponse.init(self.allocator, .NOT_FOUND, "");
+    }
+
     fn runHandler(self: *Self, request: HTTPRequest) ?HTTPResponse {
         if (self.handlers.get(request.method)) |inner| {
             if (inner.get(request.url)) |handler| {
@@ -54,6 +67,7 @@ pub const Zigzag = struct {
             } else {
                 // 404
                 std.debug.print("404", .{});
+                return self.Response404();
             }
         } else {
             // server doesn't handle this method
@@ -126,7 +140,6 @@ pub const Zigzag = struct {
                 _ = linux.shutdown(con_fd, linux.SHUT.RDWR);
                 continue;
             }
-            std.debug.print("incoming: {d}\n", .{req_len});
             if (req_len == -1) return error.FailedToRead;
 
             const request = try HTTPRequest.parse(allocator, buf[0..req_len]);
@@ -135,6 +148,7 @@ pub const Zigzag = struct {
 
             if (resp) |r| {
                 const resp_buf = try r.toString();
+                std.debug.print("body: {s}\n", .{resp_buf.items});
 
                 // send response
                 _ = linux.sendto(

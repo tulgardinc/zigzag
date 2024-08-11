@@ -2,10 +2,12 @@ const std = @import("std");
 
 pub const ResponseCode = enum(usize) {
     OK = 200,
+    NOT_FOUND = 404,
 
     pub fn getString(self: ResponseCode) []const u8 {
         return switch (self) {
             .OK => "OK",
+            .NOT_FOUND => "404",
         };
     }
 };
@@ -45,7 +47,7 @@ pub const HTTPResponse = struct {
 
         try writer.print(
             "Content-Length: {d}\n",
-            .{self.body.len},
+            .{self.body.len + 1},
         );
 
         var iter = self.headers.iterator();
