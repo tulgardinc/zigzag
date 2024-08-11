@@ -1,0 +1,9 @@
+.outer {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.title {
+    font-size: 200px;
+}
