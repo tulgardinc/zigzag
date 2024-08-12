@@ -1,4 +1,4 @@
-# Zigzag
+# ZigZag
 A minimal HTTP server written in Zig.
 
 Currently a toy project and insecure.
