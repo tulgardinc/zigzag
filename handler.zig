@@ -83,6 +83,7 @@ fn GenServeFile(comptime path: []const u8) type {
     const extension = comptime getExtention(path);
     return struct {
         fn run(allocator: std.mem.Allocator) HTTPResponse {
+            std.debug.print("serving file\n", .{});
             var file = std.fs.cwd().openFile(
                 path,
                 .{ .mode = .read_write },
@@ -95,10 +96,10 @@ fn GenServeFile(comptime path: []const u8) type {
 
             _ = file.readAll(buffer) catch unreachable;
 
-            std.debug.print("file ext: {s}\n", .{&extension});
+            std.debug.print("file ext: {s}\n", .{extension});
 
             var resp = HTTPResponse.init(allocator, .OK, buffer);
-            const content_type = std.meta.stringToEnum(ContentType, &extension) orelse .plain;
+            const content_type = std.meta.stringToEnum(ContentType, extension) orelse .plain;
             resp.headers.put("Content-Type", content_type.getString()) catch unreachable;
             return resp;
         }
@@ -118,10 +119,13 @@ fn getExtention(path: []const u8) []const u8 {
             break;
         }
     }
-    var extension: [path.len - i - 1]u8 = undefined;
-    for (0..extension.len) |j| {
-        extension[j] = path[i + j + 1];
-    }
+    const extension = blk: {
+        var temp: [path.len - i - 1]u8 = undefined;
+        for (0..temp.len) |j| {
+            temp[j] = path[i + j + 1];
+        }
+        break :blk temp;
+    };
     return &extension;
 }
 
