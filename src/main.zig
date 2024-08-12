@@ -15,9 +15,8 @@ pub fn main() !void {
     var zag = Zigzag.init(allocator);
     defer zag.deinit();
 
-    //try zag.GET("/", handleGet);
     try zag.serveFile("/", "public/index.html");
-    try zag.serveFile("/style.css", "public/style.css");
+    try zag.serveDir("/", "public");
 
     try zag.start(.{ 127, 0, 0, 1 }, 8080);
 }

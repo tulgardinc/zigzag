@@ -129,12 +129,30 @@ fn getExtention(path: []const u8) []const u8 {
     return &extension;
 }
 
+fn getExtentionRuntime(allocator: std.mem.Allocator, path: []const u8) !std.ArrayList(u8) {
+    var i = path.len;
+    while (i > 0) {
+        i -= 1;
+        const c = path[i];
+        if (c == '.') {
+            break;
+        }
+    }
+    var extension = std.ArrayList(u8).init(allocator);
+    for (0..path.len - i - 1) |j| {
+        try extension.append(path[i + j + 1]);
+    }
+    return extension;
+}
+
 fn GenServeDir(comptime path: []const u8) !type {
     return struct {
         fn run(allocator: std.mem.Allocator, request: HTTPRequest) HTTPResponse {
-            const extension = getExtention(request.url);
+            const extension = getExtentionRuntime(allocator, request.url) catch unreachable;
+            defer extension.deinit();
 
             const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, request.url }) catch unreachable;
+            std.debug.print("opening file at {s}\n", .{full_path});
             defer allocator.free(full_path);
             var file = std.fs.cwd().openFile(
                 full_path,
@@ -149,13 +167,14 @@ fn GenServeDir(comptime path: []const u8) !type {
             _ = file.readAll(buffer) catch unreachable;
 
             var resp = HTTPResponse.init(allocator, .OK, buffer);
-            const content_type = std.meta.stringToEnum(ContentType, &extension) orelse .plain;
+            const content_type = std.meta.stringToEnum(ContentType, extension.items) orelse .plain;
             resp.headers.put("Content-Type", content_type.getString()) catch unreachable;
             return resp;
         }
     };
 }
 
-pub fn dirHandler(allocator: std.mem.Allocator, comptime path: []const u8) Handler {
-    return Handler.init(allocator, GenServeDir(path).run);
+pub fn dirHandler(allocator: std.mem.Allocator, comptime path: []const u8) !Handler {
+    const fucntion = try GenServeDir(path);
+    return Handler.init(allocator, fucntion.run);
 }

@@ -48,18 +48,15 @@ pub const Zigzag = struct {
         try self.openSocket(ip_address, port);
     }
 
-    pub fn serveFile(self: *Self, url: []const u8, comptime path: []const u8) !void {
+    pub fn serveFile(self: *Self, comptime url: []const u8, comptime path: []const u8) !void {
         const handler = h.fileHandler(self.allocator, path);
         try self.assignHandler(.GET, url, handler);
     }
 
-    pub fn serveDir(self: *Self, url: []const u8, comptime path: []const u8) !void {
-        const result = try self.handlers.getOrPut(.GET);
-        if (!result.found_existing) {
-            result.value_ptr.* = std.StringHashMap(Handler).init(self.allocator);
-        }
-        const handler = h.fileHandler(self.allocator, path);
-        try result.value_ptr.put(url, handler);
+    pub fn serveDir(self: *Self, comptime url: []const u8, comptime path: []const u8) !void {
+        const handler = try h.dirHandler(self.allocator, path);
+        const new_url = url ++ "/*";
+        try self.assignHandler(.GET, new_url, handler);
     }
 
     fn parseUrl(allocator: std.mem.Allocator, url: []const u8) !UrlSegments {
@@ -300,6 +297,28 @@ test "url tree" {
     try zag.serveFile("/style.css", "public/style.css");
 
     const message = try std.fmt.allocPrint(allocator, "{s}", .{"GET / HTTP/1.1\n"});
+    defer allocator.free(message);
+    var request = try HTTPRequest.parse(allocator, message);
+    defer request.deinit();
+
+    var resp = (try zag.runHandler(request)).?;
+    defer resp.deinit();
+    std.debug.print("====================\n", .{});
+    std.debug.print("body: {s}\n", .{resp.body});
+    std.debug.print("code: {d}\n", .{@intFromEnum(resp.response_code)});
+}
+
+test "directory" {
+    const allocator = std.testing.allocator;
+
+    var zag = Zigzag.init(allocator);
+    defer zag.deinit();
+
+    //try zag.GET("/", handleGet);
+    try zag.serveFile("/", "public/index.html");
+    try zag.serveDir("/", "public");
+
+    const message = try std.fmt.allocPrint(allocator, "{s}", .{"GET /style.css HTTP/1.1\n"});
     defer allocator.free(message);
     var request = try HTTPRequest.parse(allocator, message);
     defer request.deinit();
