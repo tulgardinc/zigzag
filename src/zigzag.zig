@@ -258,7 +258,6 @@ pub const Zigzag = struct {
         // bind socket to an adderss
         const addr = std.net.Ip4Address.init(ip_address, port);
         const bind_errno = linux.bind(self.main_fd.?, @ptrCast(&addr.sa), addr.getOsSockLen());
-        errdefer gracefulShutdown();
         if (bind_errno != 0) {
             _ = linux.close(self.main_fd.?);
             return error.FailedToBind;
