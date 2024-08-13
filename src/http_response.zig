@@ -1,17 +1,23 @@
 const std = @import("std");
 
+/// Response code for an HTTP response
 pub const ResponseCode = enum(usize) {
     OK = 200,
     NOT_FOUND = 404,
+    METHOD_NOT_ALLOWED = 405,
+    INTERNAL_SERVER_ERROR = 500,
 
     pub fn getString(self: ResponseCode) []const u8 {
         return switch (self) {
             .OK => "OK",
-            .NOT_FOUND => "404",
+            .NOT_FOUND => "PAGE NOT FOUND",
+            .METHOD_NOT_ALLOWED => "METHOD NOT ALLOWED",
+            .INTERNAL_SERVER_ERROR => "INTERNAL SERVER ERROR",
         };
     }
 };
 
+/// Represents an HTTP response from the server
 pub const HTTPResponse = struct {
     response_code: ResponseCode,
     headers: std.StringHashMap([]const u8),
@@ -34,6 +40,7 @@ pub const HTTPResponse = struct {
         self.allocator.free(self.body);
     }
 
+    /// Converts the HTTPResponse instance into string
     pub fn toString(self: Self) !std.ArrayList(u8) {
         var buffer = std.ArrayList(u8).init(self.allocator);
         const writer = buffer.writer();

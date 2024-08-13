@@ -1,9 +1,11 @@
 const std = @import("std");
 
+/// Request methods
 pub const Methods = enum {
     GET,
 };
 
+/// Represents an HTTP request from the client
 pub const HTTPRequest = struct {
     allocator: std.mem.Allocator,
     method: Methods,
@@ -12,6 +14,7 @@ pub const HTTPRequest = struct {
 
     const Self = @This();
 
+    /// parse an HTTP request into an HTTPRequest instance
     pub fn parse(allocator: std.mem.Allocator, message: []u8) !Self {
         var line_start: usize = 0;
         var curr_line: usize = 1;
@@ -23,6 +26,7 @@ pub const HTTPRequest = struct {
                 if (curr_line == 1) {
                     var space_index: usize = 0;
                     const line = message[line_start..line_end];
+                    // Get the method and the url (slug)
                     for (line, 0..) |c, index| {
                         if (c == ' ') {
                             if (space_index == 0) {
@@ -40,6 +44,7 @@ pub const HTTPRequest = struct {
                         }
                     }
                 }
+                // Get headers
                 const line = message[line_start..line_end];
                 for (line, 0..) |c, i| {
                     if (c == ':') {

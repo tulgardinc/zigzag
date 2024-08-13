@@ -18,8 +18,9 @@ pub const ContentType = enum {
     }
 };
 
+/// Wraps a function that handles an endpoint
 pub const Handler = struct {
-    fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) ?HTTPResponse,
+    fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) anyerror!?HTTPResponse,
     allocator: std.mem.Allocator,
 
     const Self = @This();
@@ -32,13 +33,15 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Self, request: HTTPRequest) ?HTTPResponse {
-        return self.fn_run_ptr(self.allocator, request);
+    pub fn run(self: Self, request: HTTPRequest) !?HTTPResponse {
+        return try self.fn_run_ptr(self.allocator, request);
     }
 
+    /// Generates a function that allows for the underlying endpoint function to be
+    /// called without having to know it's type
     fn GenRunFn(comptime func: anytype) type {
         return struct {
-            fn run(allocator: std.mem.Allocator, req: HTTPRequest) ?HTTPResponse {
+            fn run(allocator: std.mem.Allocator, req: HTTPRequest) !?HTTPResponse {
                 const args = std.meta.ArgsTuple(@TypeOf(func));
                 const fields = std.meta.fields(args);
 
@@ -51,16 +54,20 @@ pub const Handler = struct {
                 const ret_type = func_info.Fn.return_type;
                 const ret_info = @typeInfo(ret_type.?);
 
+                // the http response
                 var resp: ?HTTPResponse = null;
+                // whether the handler returns a response at all
                 comptime var should_resp = true;
                 if (ret_info == .ErrorUnion) {
                     should_resp = ret_info.ErrorUnion.payload != void;
                 }
 
                 if (fields.len == 0) {
+                    // if the function takes no arguments, just call it.
                     const ret = func();
                     if (should_resp) resp = ret;
                 } else {
+                    // otherwise fill the arguments/injections
                     var args_tuple: std.meta.Tuple(&arg_types) = undefined;
                     inline for (&args_tuple) |*el| {
                         switch (@TypeOf(el.*)) {
@@ -69,8 +76,16 @@ pub const Handler = struct {
                             else => unreachable,
                         }
                     }
+                    // call the function
                     const ret = @call(.auto, func, args_tuple);
-                    if (should_resp) resp = ret;
+                    if (should_resp) {
+                        // handle it if there is an error
+                        if (ret_info == .ErrorUnion) {
+                            resp = try ret;
+                        } else {
+                            resp = ret;
+                        }
+                    }
                 }
 
                 return resp;
@@ -79,37 +94,41 @@ pub const Handler = struct {
     }
 };
 
+/// Generates a function that returns a file for an endpoint
 fn GenServeFile(comptime path: []const u8) type {
     const extension = comptime getExtention(path);
     return struct {
-        fn run(allocator: std.mem.Allocator) HTTPResponse {
-            std.debug.print("serving file\n", .{});
-            var file = std.fs.cwd().openFile(
+        fn run(allocator: std.mem.Allocator) !HTTPResponse {
+            std.debug.print("serving file {s}\n", .{path});
+            var file = try std.fs.cwd().openFile(
                 path,
                 .{ .mode = .read_write },
-            ) catch unreachable;
+            );
             defer file.close();
 
-            const file_size = file.getEndPos() catch unreachable;
+            const file_size = try file.getEndPos();
 
-            const buffer = allocator.alloc(u8, file_size) catch unreachable;
+            const buffer = try allocator.alloc(u8, file_size);
 
-            _ = file.readAll(buffer) catch unreachable;
+            _ = try file.readAll(buffer);
 
             std.debug.print("file ext: {s}\n", .{extension});
 
             var resp = HTTPResponse.init(allocator, .OK, buffer);
+            // Get the content type from the file extension
             const content_type = std.meta.stringToEnum(ContentType, extension) orelse .plain;
-            resp.headers.put("Content-Type", content_type.getString()) catch unreachable;
+            try resp.headers.put("Content-Type", content_type.getString());
             return resp;
         }
     };
 }
 
+/// Returns a handler that serves a file
 pub fn fileHandler(allocator: std.mem.Allocator, comptime path: []const u8) Handler {
     return Handler.init(allocator, GenServeFile(path).run);
 }
 
+/// Gets the extension from a file name during comptime
 fn getExtention(path: []const u8) []const u8 {
     var i = path.len;
     while (i > 0) {
@@ -129,6 +148,7 @@ fn getExtention(path: []const u8) []const u8 {
     return &extension;
 }
 
+/// Gets the extension from a file during runtime
 fn getExtentionRuntime(allocator: std.mem.Allocator, path: []const u8) !std.ArrayList(u8) {
     var i = path.len;
     while (i > 0) {
@@ -145,35 +165,48 @@ fn getExtentionRuntime(allocator: std.mem.Allocator, path: []const u8) !std.Arra
     return extension;
 }
 
+/// Generates a function that serves the contents of a directory for
+/// an endpoint
 fn GenServeDir(comptime path: []const u8) !type {
     return struct {
-        fn run(allocator: std.mem.Allocator, request: HTTPRequest) HTTPResponse {
-            const extension = getExtentionRuntime(allocator, request.url) catch unreachable;
+        fn run(allocator: std.mem.Allocator, request: HTTPRequest) !HTTPResponse {
+            const extension = try getExtentionRuntime(allocator, request.url);
             defer extension.deinit();
 
-            const full_path = std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, request.url }) catch unreachable;
-            std.debug.print("opening file at {s}\n", .{full_path});
+            // Make sure file is within the specified directory to avoid attacks with ../ etc.
+            const normalized_path = try std.fs.realpathAlloc(allocator, path);
+            defer allocator.free(normalized_path);
+
+            const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, request.url });
             defer allocator.free(full_path);
-            var file = std.fs.cwd().openFile(
-                full_path,
+
+            const normalized_request_path = std.fs.realpathAlloc(allocator, full_path) catch return HTTPResponse.init(allocator, .NOT_FOUND, "");
+            defer allocator.free(normalized_request_path);
+
+            if (!std.mem.startsWith(u8, normalized_request_path, normalized_path)) return error.WrongPath;
+
+            var file = try std.fs.openFileAbsolute(
+                normalized_request_path,
                 .{ .mode = .read_write },
-            ) catch unreachable;
+            );
             defer file.close();
 
-            const file_size = file.getEndPos() catch unreachable;
+            const file_size = try file.getEndPos();
 
-            const buffer = allocator.alloc(u8, file_size) catch unreachable;
+            const buffer = try allocator.alloc(u8, file_size);
 
-            _ = file.readAll(buffer) catch unreachable;
+            _ = try file.readAll(buffer);
 
             var resp = HTTPResponse.init(allocator, .OK, buffer);
+            // Get the content type from the file extension
             const content_type = std.meta.stringToEnum(ContentType, extension.items) orelse .plain;
-            resp.headers.put("Content-Type", content_type.getString()) catch unreachable;
+            try resp.headers.put("Content-Type", content_type.getString());
             return resp;
         }
     };
 }
 
+/// Returns a handler that serves a directory
 pub fn dirHandler(allocator: std.mem.Allocator, comptime path: []const u8) !Handler {
     const fucntion = try GenServeDir(path);
     return Handler.init(allocator, fucntion.run);

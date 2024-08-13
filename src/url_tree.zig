@@ -1,9 +1,13 @@
 const std = @import("std");
 const Handler = @import("handler.zig").Handler;
 
+/// Datastructure to build a URL tree for routing
 pub const UrlNode = struct {
+    // the url segment of the node
     segment: []const u8,
+    // child segments
     children: std.StringHashMap(UrlNode),
+    // the handler for the endpoint if any exists
     handler: ?Handler,
     allocator: std.mem.Allocator,
 
@@ -22,7 +26,6 @@ pub const UrlNode = struct {
 
     pub fn deinit(self: *Self) void {
         var key_iter = self.children.keyIterator();
-        std.debug.print("freeing {s}\n", .{self.segment});
         while (key_iter.next()) |key| {
             self.allocator.free(key.*);
         }
@@ -31,6 +34,7 @@ pub const UrlNode = struct {
     }
 };
 
+/// A datastructure that makes it easier to interact with URL segments
 pub const UrlSegments = struct {
     segments: std.ArrayList(std.ArrayList(u8)),
 
