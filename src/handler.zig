@@ -20,7 +20,7 @@ pub const ContentType = enum {
 
 /// Wraps a function that handles an endpoint
 pub const Handler = struct {
-    fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) anyerror!?HTTPResponse,
+    fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) anyerror!HTTPResponse,
     allocator: std.mem.Allocator,
 
     const Self = @This();
@@ -33,7 +33,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Self, request: HTTPRequest) !?HTTPResponse {
+    pub fn run(self: Self, request: HTTPRequest) !HTTPResponse {
         return try self.fn_run_ptr(self.allocator, request);
     }
 
@@ -41,7 +41,7 @@ pub const Handler = struct {
     /// called without having to know it's type
     fn GenRunFn(comptime func: anytype) type {
         return struct {
-            fn run(allocator: std.mem.Allocator, req: HTTPRequest) !?HTTPResponse {
+            fn run(allocator: std.mem.Allocator, req: HTTPRequest) !HTTPResponse {
                 const args = std.meta.ArgsTuple(@TypeOf(func));
                 const fields = std.meta.fields(args);
 
@@ -55,17 +55,11 @@ pub const Handler = struct {
                 const ret_info = @typeInfo(ret_type.?);
 
                 // the http response
-                var resp: ?HTTPResponse = null;
-                // whether the handler returns a response at all
-                comptime var should_resp = true;
-                if (ret_info == .ErrorUnion) {
-                    should_resp = ret_info.ErrorUnion.payload != void;
-                }
-
+                var resp: HTTPResponse = undefined;
                 if (fields.len == 0) {
                     // if the function takes no arguments, just call it.
                     const ret = func();
-                    if (should_resp) resp = ret;
+                    resp = ret;
                 } else {
                     // otherwise fill the arguments/injections
                     var args_tuple: std.meta.Tuple(&arg_types) = undefined;
@@ -78,13 +72,11 @@ pub const Handler = struct {
                     }
                     // call the function
                     const ret = @call(.auto, func, args_tuple);
-                    if (should_resp) {
-                        // handle it if there is an error
-                        if (ret_info == .ErrorUnion) {
-                            resp = try ret;
-                        } else {
-                            resp = ret;
-                        }
+                    // handle it if there is an error
+                    if (ret_info == .ErrorUnion) {
+                        resp = try ret;
+                    } else {
+                        resp = ret;
                     }
                 }
 
@@ -99,7 +91,6 @@ fn GenServeFile(comptime path: []const u8) type {
     const extension = comptime getExtention(path);
     return struct {
         fn run(allocator: std.mem.Allocator) !HTTPResponse {
-            std.debug.print("serving file {s}\n", .{path});
             var file = try std.fs.cwd().openFile(
                 path,
                 .{ .mode = .read_write },
@@ -111,8 +102,6 @@ fn GenServeFile(comptime path: []const u8) type {
             const buffer = try allocator.alloc(u8, file_size);
 
             _ = try file.readAll(buffer);
-
-            std.debug.print("file ext: {s}\n", .{extension});
 
             var resp = HTTPResponse.init(allocator, .OK, buffer);
             // Get the content type from the file extension

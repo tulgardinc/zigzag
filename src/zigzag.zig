@@ -13,18 +13,27 @@ const c = @cImport({
     @cInclude("signal.h");
 });
 
+/// Represents an open connection
+const Connection = struct {
+    timeout: u16,
+    resp_count: u16,
+    last_request: i64,
+};
+
 /// Used for signal handlers
-var g_zag_ptr: *Zigzag = undefined;
+var g_zag_ptr: ?*Zigzag = null;
 
 /// The http server
 pub const Zigzag = struct {
     allocator: std.mem.Allocator,
     /// Url tree used to find handlers on request
     handlers: std.AutoHashMap(Methods, UrlNode),
-    /// List of connected file descriptors
-    connections: std.ArrayList(linux.fd_t),
+    /// Map of active TCP connections
+    connections: std.AutoHashMap(linux.fd_t, Connection),
+    /// File descriptors to read from in the event loop
+    read_fds: std.ArrayList(linux.fd_t),
     /// The file descriptor of the active socket
-    socket_file_descriptor: ?linux.fd_t = null,
+    main_fd: ?linux.fd_t = null,
 
     const Self = @This();
 
@@ -32,7 +41,8 @@ pub const Zigzag = struct {
         const self = Self{
             .allocator = allocator,
             .handlers = std.AutoHashMap(Methods, UrlNode).init(allocator),
-            .connections = std.ArrayList(linux.fd_t).init(allocator),
+            .read_fds = std.ArrayList(linux.fd_t).init(allocator),
+            .connections = std.AutoHashMap(linux.fd_t, Connection).init(allocator),
         };
         g_zag_ptr = @constCast(&self);
         return self;
@@ -57,14 +67,20 @@ pub const Zigzag = struct {
         while (iter.next()) |root| {
             deinitNodeTree(root);
         }
+        self.connections.deinit();
         self.handlers.deinit();
     }
 
     /// On unanticipated shutdown, cleans up the socket connections
     fn gracefulShutdown() void {
         std.debug.print("exiting\n", .{});
-        _ = linux.shutdown(g_zag_ptr.connections.items[0], linux.SHUT.RDWR);
-        _ = linux.close(g_zag_ptr.socket_file_descriptor.?);
+        std.debug.print("main: {d}\n", .{g_zag_ptr.?.main_fd.?});
+        std.debug.print("count {d}\n", .{g_zag_ptr.?.connections.count()});
+        var iter = g_zag_ptr.?.connections.keyIterator();
+        while (iter.next()) |fd| {
+            _ = linux.shutdown(fd.*, linux.SHUT.RDWR);
+        }
+        _ = linux.close(g_zag_ptr.?.main_fd.?);
         std.c.exit(0);
     }
 
@@ -78,7 +94,7 @@ pub const Zigzag = struct {
     /// Starts the server at given address and port
     pub fn start(self: *Self, ip_address: [4]u8, port: u16) !void {
         _ = c.signal(linux.SIG.INT, sigHandler);
-        try self.openSocket(ip_address, port);
+        try self.startEventLoop(ip_address, port);
     }
 
     /// Serves a file from the specified endpoint
@@ -134,13 +150,11 @@ pub const Zigzag = struct {
         if (!result.found_existing) {
             // Initiate root node
             const new_node = try UrlNode.init(self.allocator, "/", null);
-            std.debug.print("creating root\n", .{});
             result.value_ptr.* = new_node;
         }
         var prev_node_ptr = result.value_ptr;
         if (segments.segments.items.len == 1) {
             // If the endpoint is the root segment then assign and exit early
-            std.debug.print("assigning handler to root: {s}\n", .{prev_node_ptr.segment});
             prev_node_ptr.handler = handler;
             return;
         }
@@ -150,7 +164,6 @@ pub const Zigzag = struct {
             var child_ptr = prev_node_ptr.children.getPtr(segment.items);
             if (child_ptr == null) {
                 // If node for the segment doesn't exist in the tree, create it
-                std.debug.print("creating node with segment: {s}\n", .{segment.items});
                 const new_node = try UrlNode.init(self.allocator, segment.items, null);
                 const key = try self.allocator.alloc(u8, segment.items.len);
                 @memcpy(key, segment.items);
@@ -159,7 +172,6 @@ pub const Zigzag = struct {
             }
             if (i == segments.segments.items.len - 1) {
                 // Assign the handler to the final segment of the url.
-                std.debug.print("assigning segment handler: {s}\n", .{child_ptr.?.*.segment});
                 child_ptr.?.handler = handler;
             }
         }
@@ -182,21 +194,17 @@ pub const Zigzag = struct {
         segments: *const UrlSegments,
         index: usize,
         cur_node_ptr: *const UrlNode,
-    ) !?HTTPResponse {
-        std.debug.print("recursing node segment {s}\n", .{segments.segments.items[index].items});
+    ) !HTTPResponse {
         if (index == segments.segments.items.len - 1) {
             // If on the last segment
-            std.debug.print("last node is {s} with handler {any}\n", .{ cur_node_ptr.segment, cur_node_ptr.handler });
             if (cur_node_ptr.handler) |handler| {
                 // If this segment is an endpoint run the handler
-                std.debug.print("returning handler\n", .{});
                 return try handler.run(request);
             }
             // If the segment is not an endpoint then 404
             return self.Response404();
         }
         const next_segment = segments.segments.items[index + 1];
-        std.debug.print("next segment {s}\n", .{next_segment.items});
         if (cur_node_ptr.children.getPtr(next_segment.items)) |next_node_ptr| {
             // If the segment has children then move into them
             var resp = try self.recurseUrlTree(
@@ -206,7 +214,7 @@ pub const Zigzag = struct {
                 next_node_ptr,
             );
             // If child search was not successfull and if the current segment has a fall back, call it
-            if (resp != null and resp.?.response_code == .NOT_FOUND) {
+            if (resp.response_code == .NOT_FOUND) {
                 if (cur_node_ptr.children.getPtr("*")) |wild_ptr| {
                     resp = try wild_ptr.handler.?.run(request);
                 }
@@ -222,12 +230,11 @@ pub const Zigzag = struct {
     }
 
     /// runs a handler based on a request
-    fn runHandler(self: *Self, request: HTTPRequest) !?HTTPResponse {
+    fn runHandler(self: *Self, request: HTTPRequest) !HTTPResponse {
         var segments = try parseUrl(self.allocator, request.url);
         defer segments.deinit();
         const root_node = self.handlers.get(request.method);
         if (root_node) |n| {
-            std.debug.print("entry node segment: {s}\n", .{n.segment});
             return self.recurseUrlTree(
                 request,
                 &segments,
@@ -239,24 +246,37 @@ pub const Zigzag = struct {
         return self.Response404();
     }
 
-    fn openSocket(self: *Self, ip_address: [4]u8, port: u16) !void {
+    fn handleActiveConnections(self: *Self) void {
+        var iter = self.connections.iterator();
+        while (iter.next()) |e| {
+            if (std.time.timestamp() - e.value_ptr.last_request >= e.value_ptr.timeout) {
+                std.debug.print("connection timed out\n", .{});
+                _ = linux.shutdown(e.key_ptr.*, linux.SHUT.RDWR);
+                _ = self.connections.remove(e.key_ptr.*);
+            }
+        }
+    }
+
+    fn startEventLoop(self: *Self, ip_address: [4]u8, port: u16) !void {
         var gpa = std.heap.GeneralPurposeAllocator(.{}){};
         const allocator = gpa.allocator();
 
-        //ipv4 domain
+        // ipv4 domain
         const domain = linux.AF.INET;
         // Error checked, ordered two way communication
         const socket_type = linux.SOCK.STREAM;
         // the default protocol
         const socket_protocol = 0;
 
-        // get file descriptor pointing to a socket
-        self.socket_file_descriptor = @intCast(linux.socket(domain, socket_type, socket_protocol));
-        if (self.socket_file_descriptor.? == -1) return error.FailedToGetDescriptor;
+        // get the main file descriptor, for the socket
+        self.main_fd = @intCast(linux.socket(domain, socket_type, socket_protocol));
+        if (self.main_fd.? == -1) return error.FailedToGetDescriptor;
 
+        // set reusable so the so the socket is immidiately ready for reuse after
+        // shutdown
         const enable: c_int = 1;
         _ = linux.setsockopt(
-            self.socket_file_descriptor.?,
+            self.main_fd.?,
             linux.SOL.SOCKET,
             linux.SO.REUSEADDR,
             @ptrCast(&enable),
@@ -265,74 +285,147 @@ pub const Zigzag = struct {
 
         // bind socket to an adderss
         const addr = std.net.Ip4Address.init(ip_address, port);
-        const bind_errno = linux.bind(self.socket_file_descriptor.?, @ptrCast(&addr.sa), addr.getOsSockLen());
+        const bind_errno = linux.bind(self.main_fd.?, @ptrCast(&addr.sa), addr.getOsSockLen());
         errdefer gracefulShutdown();
         if (bind_errno != 0) {
-            _ = linux.close(self.socket_file_descriptor.?);
+            _ = linux.close(self.main_fd.?);
             return error.FailedToBind;
         }
 
         // start listeninng to the socket
         const max_queue = 10;
-        const listen_errno = linux.listen(self.socket_file_descriptor.?, max_queue);
+        const listen_errno = linux.listen(self.main_fd.?, max_queue);
         if (listen_errno != 0) return error.FailedToListen;
 
-        // Start loop
+        // add the socket fd to be listened to by epoll
+        try self.read_fds.append(self.main_fd.?);
+        const epoll_fd: linux.fd_t = @intCast(linux.epoll_create());
+        var epoll_socket_ev = linux.epoll_event{
+            .data = .{ .fd = self.main_fd.? },
+            .events = linux.EPOLL.IN,
+        };
+        _ = linux.epoll_ctl(
+            epoll_fd,
+            @intCast(linux.EPOLL.CTL_ADD),
+            self.main_fd.?,
+            &epoll_socket_ev,
+        );
+
+        // setup array of triggered events for epoll
+        const max_connections = 20;
+        var triggered_events: [20]linux.epoll_event = undefined;
+
+        // The event loop
         while (true) {
-            // accpet pending connection by creating a new socket that is only
-            // to communicate with that new connection
-            const con_addr_ptr = try allocator.create(std.net.Ip4Address);
-            defer allocator.destroy(con_addr_ptr);
-            var sock_len = con_addr_ptr.getOsSockLen();
-            const con_fd: linux.fd_t = @intCast(linux.accept(
-                self.socket_file_descriptor.?,
-                @ptrCast(&con_addr_ptr.*.sa),
-                &sock_len,
-            ));
-            try self.connections.append(con_fd);
-            if (con_fd == -1) return error.FailedToAccept;
+            self.handleActiveConnections();
 
-            // connect to the accpeted connection
-            const connect_errno = linux.connect(
-                con_fd,
-                @ptrCast(&con_addr_ptr.*.sa),
-                con_addr_ptr.getOsSockLen(),
+            // see if any of the fds need reading
+            const triggered_event_count = linux.epoll_wait(
+                epoll_fd,
+                &triggered_events,
+                max_connections,
+                -1,
             );
-            if (connect_errno == -1) return error.FailedToConnect;
 
-            // Receive request
-            const buf = try allocator.alloc(u8, 1000);
-            defer allocator.free(buf);
-            const req_len = linux.read(con_fd, @ptrCast(buf), buf.len);
-            if (req_len == 0) {
-                _ = linux.shutdown(con_fd, linux.SHUT.RDWR);
-                continue;
-            }
-            if (req_len == -1) return error.FailedToRead;
+            for (0..triggered_event_count) |i| {
+                if (triggered_events[i].data.fd == self.main_fd) {
+                    // main socket fd triggered
+                    // get the conn fd
+                    std.debug.print("received new connection\n", .{});
+                    const con_addr_ptr = try allocator.create(std.net.Ip4Address);
+                    defer allocator.destroy(con_addr_ptr);
+                    var sock_len = con_addr_ptr.getOsSockLen();
+                    const con_fd: linux.fd_t = @intCast(linux.accept(
+                        self.main_fd.?,
+                        @ptrCast(&con_addr_ptr.*.sa),
+                        &sock_len,
+                    ));
+                    if (con_fd == -1) return error.FailedToAccept;
+                    // add conn fd to be listened for by epoll
+                    try self.read_fds.append(con_fd);
+                    var con_ev = linux.epoll_event{
+                        .data = .{ .fd = con_fd },
+                        .events = linux.EPOLL.IN,
+                    };
+                    _ = linux.epoll_ctl(
+                        epoll_fd,
+                        linux.EPOLL.CTL_ADD,
+                        con_fd,
+                        &con_ev,
+                    );
+                } else {
+                    // receiving a request from a client
+                    const con_fd = triggered_events[i].data.fd;
+                    const buf = try allocator.alloc(u8, 1000);
+                    defer allocator.free(buf);
+                    const req_len = linux.read(con_fd, @ptrCast(buf), buf.len);
+                    if (req_len == 0) {
+                        // connection closed from the server
+                        _ = linux.shutdown(con_fd, linux.SHUT.RDWR);
+                        _ = self.connections.remove(con_fd);
+                        continue;
+                    }
+                    if (req_len == -1) return error.FailedToRead;
 
-            const request = try HTTPRequest.parse(allocator, buf[0..req_len]);
+                    const request = try HTTPRequest.parse(allocator, buf[0..req_len]);
 
-            // Get response
-            const resp = self.runHandler(request) catch self.Response500();
+                    // Get response
+                    var resp = self.runHandler(request) catch self.Response500();
 
-            if (resp) |r| {
-                // If a response exists return it
-                const resp_buf = try r.toString();
-                std.debug.print("body: {s}\n", .{resp_buf.items});
+                    var should_close = true;
 
-                // send response
-                _ = linux.sendto(
-                    con_fd,
-                    @ptrCast(resp_buf.items),
-                    resp_buf.items.len,
-                    0,
-                    @ptrCast(&con_addr_ptr.*.sa),
-                    sock_len,
-                );
+                    const max_responses = 100;
+                    // const con_timeout = 5;
+                    //
+
+                    std.debug.print("processing connection: {d}\n", .{con_fd});
+                    var debug_iter = self.connections.iterator();
+                    while (debug_iter.next()) |d| {
+                        std.debug.print("other connections, fd: {d}\n", .{d.key_ptr.*});
+                    }
+
+                    if (request.headers.get("Connection")) |req_con| {
+                        if (std.mem.eql(u8, req_con, "close")) {
+                            const remove_resp = self.connections.remove(con_fd);
+                            if (!remove_resp) std.debug.panic("CLOSE WITHOUT CON: ", .{});
+                        } else if (self.connections.getPtr(con_fd)) |active_con| {
+                            active_con.resp_count -= 1;
+                            if (active_con.resp_count == 0) {
+                                try resp.headers.put("Connection", "close");
+                            } else {
+                                try resp.headers.put("Connection", "keep-alive");
+                                should_close = false;
+                            }
+                        } else {
+                            std.debug.print("creating connection, responding with keep-alive\n", .{});
+                            try self.connections.put(con_fd, Connection{
+                                .resp_count = max_responses,
+                                .timeout = 5,
+                                .last_request = std.time.timestamp(),
+                            });
+                            try resp.headers.put("Connection", "keep-alive");
+                            try resp.headers.put("Keep-Alive", "timeout=5; max=100");
+                            should_close = false;
+                        }
+                    }
+
+                    // If a response exists return it
+                    const resp_buf = try resp.toString();
+
+                    // send response
+                    _ = linux.write(
+                        con_fd,
+                        @ptrCast(resp_buf.items),
+                        resp_buf.items.len,
+                    );
+
+                    if (should_close) {
+                        std.debug.print("closing connection\n", .{});
+                        _ = linux.shutdown(con_fd, linux.SHUT.RDWR);
+                    }
+                }
             }
         }
-
-        _ = linux.close(self.socket_file_descriptor.?);
     }
 };
 

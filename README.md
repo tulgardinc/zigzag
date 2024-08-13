@@ -7,11 +7,12 @@ Currently a toy project and insecure.
 - [x] Shutdown server nicely when C-c
 - [x] Sanitize request when serving directories
 - [x] Comments and docstrings
-- [ ] Multithreading
+- [x] Event driven architecture for conqurrent connectinos/requests
 - [ ] Support for all HTTP methods
 - [ ] Support state injection to endpoints
 - [ ] Support route parameters
 - [ ] Support for all response codes
 - [ ] Automatically configure headers for the response
 - [ ] Support compression
-- [ ] Keep HTTP connection open when requested
+- [ ] Support for streaming the response (right now response hangs the event loop)
+- [x] Keep HTTP connection open when requested
