@@ -9,9 +9,6 @@ const Handler = @import("handler.zig").Handler;
 const h = @import("handler.zig");
 const UrlNode = @import("url_tree.zig").UrlNode;
 const UrlSegments = @import("url_tree.zig").UrlSegments;
-const c = @cImport({
-    @cInclude("signal.h");
-});
 
 /// Represents an open connection
 const Connection = struct {
@@ -19,9 +16,6 @@ const Connection = struct {
     resp_count: u16,
     last_request: i64,
 };
-
-/// Used for signal handlers
-var g_zag_ptr: ?*Zigzag = null;
 
 /// The http server
 pub const Zigzag = struct {
@@ -44,7 +38,6 @@ pub const Zigzag = struct {
             .read_fds = std.ArrayList(linux.fd_t).init(allocator),
             .connections = std.AutoHashMap(linux.fd_t, Connection).init(allocator),
         };
-        g_zag_ptr = @constCast(&self);
         return self;
     }
 
@@ -71,29 +64,8 @@ pub const Zigzag = struct {
         self.handlers.deinit();
     }
 
-    /// On unanticipated shutdown, cleans up the socket connections
-    fn gracefulShutdown() void {
-        std.debug.print("exiting\n", .{});
-        std.debug.print("main: {d}\n", .{g_zag_ptr.?.main_fd.?});
-        std.debug.print("count {d}\n", .{g_zag_ptr.?.connections.count()});
-        var iter = g_zag_ptr.?.connections.keyIterator();
-        while (iter.next()) |fd| {
-            _ = linux.shutdown(fd.*, linux.SHUT.RDWR);
-        }
-        _ = linux.close(g_zag_ptr.?.main_fd.?);
-        std.c.exit(0);
-    }
-
-    /// Handles interrupts
-    fn sigHandler(signal: i32) callconv(.C) void {
-        if (signal == linux.SIG.INT) {
-            gracefulShutdown();
-        }
-    }
-
     /// Starts the server at given address and port
     pub fn start(self: *Self, ip_address: [4]u8, port: u16) !void {
-        _ = c.signal(linux.SIG.INT, sigHandler);
         try self.startEventLoop(ip_address, port);
     }
 

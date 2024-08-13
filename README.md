@@ -15,4 +15,5 @@ Currently a toy project and insecure.
 - [ ] Automatically configure headers for the response
 - [ ] Support compression
 - [ ] Support for streaming the response (right now response hangs the event loop)
+- [ ] Support gracefull shutdown
 - [x] Keep HTTP connection open when requested
