@@ -120,7 +120,6 @@ pub const Zigzag = struct {
 
     /// Assigns a handler to an endpoint in the URL tree
     pub fn assignHandler(self: *Self, method: Methods, url: []const u8, handler: Handler) !void {
-        std.debug.print("url: {s}\n", .{url});
         const result = try self.handlers.getOrPut(method);
         var segments = try parseUrl(self.allocator, url);
         defer segments.deinit();
@@ -156,6 +155,7 @@ pub const Zigzag = struct {
                 // Assign the handler to the final segment of the url.
                 child_ptr.?.handler = handler;
             }
+            prev_node_ptr = child_ptr.?;
         }
     }
 
@@ -177,10 +177,7 @@ pub const Zigzag = struct {
         index: usize,
         cur_node_ptr: *const UrlNode,
     ) !HTTPResponse {
-        std.debug.print("cur seg {s}\n", .{cur_node_ptr.segment});
-        std.debug.print("index: {d} len: {d}\n", .{ index, segments.segments.items.len });
         if (index == segments.segments.items.len - 1) {
-            std.debug.print("last segment found\n", .{});
             // If on the last segment
             if (cur_node_ptr.handler) |handler| {
                 // If this segment is an endpoint run the handler
@@ -192,46 +189,56 @@ pub const Zigzag = struct {
         const next_segment = segments.segments.items[index + 1];
         if (cur_node_ptr.children.getPtr(next_segment.items)) |next_node_ptr| {
             // If the segment has children then move into them
-            var resp = try self.recurseUrlTree(
+            const resp = try self.recurseUrlTree(
                 request,
                 segments,
                 index + 1,
                 next_node_ptr,
             );
-            if (resp.response_code == .NOT_FOUND) {
-                std.debug.print("looking for params\n", .{});
-                if (cur_node_ptr.children.getPtr("<param>")) |param_ptr| {
-                    std.debug.print("running params\n", .{});
-                    resp = try self.recurseUrlTree(
-                        request,
-                        segments,
-                        index + 1,
-                        param_ptr,
-                    );
-                }
+            if (resp.response_code != .NOT_FOUND) {
+                return resp;
             }
-            // If child search was not successfull and if the current segment has a fall back, call it
-            if (resp.response_code == .NOT_FOUND) {
-                if (cur_node_ptr.children.getPtr("*")) |wild_ptr| {
-                    resp = try wild_ptr.handler.?.run(request);
-                }
-            }
-            return resp;
-        } else if (cur_node_ptr.children.getPtr("<param>")) |param_ptr| {
-            std.debug.print("running params\n", .{});
-            return try self.recurseUrlTree(
+        }
+        if (cur_node_ptr.children.getPtr("<param>")) |param_ptr| {
+            const resp = try self.recurseUrlTree(
                 request,
                 segments,
                 index + 1,
                 param_ptr,
             );
-        } else if (cur_node_ptr.children.getPtr("*")) |wild_ptr| {
+            if (resp.response_code != .NOT_FOUND) {
+                return resp;
+            }
+        }
+        if (cur_node_ptr.children.getPtr("*")) |wild_ptr| {
             // If the segment had no children but has a fallback
             return wild_ptr.handler.?.run(request);
-        } else {
-            std.debug.print("found 404\n", .{});
-            return self.Response404();
         }
+        std.debug.print("segment {s} found 404\n", .{cur_node_ptr.segment});
+        return self.Response404();
+    }
+
+    fn debugUrlTreesRecurse(allocator: std.mem.Allocator, node: *const UrlNode, depth: usize) !void {
+        const padding = try allocator.alloc(u8, depth * 4);
+        defer allocator.free(padding);
+        @memset(padding, ' ');
+        std.debug.print("{s}- {s}\n", .{ padding, node.segment });
+
+        var child_iter = node.children.valueIterator();
+        while (child_iter.next()) |child| {
+            try debugUrlTreesRecurse(allocator, child, depth + 1);
+        }
+    }
+
+    fn debugUrlTrees(self: Self) !void {
+        std.debug.print("=========URL=TREE=========\n", .{});
+        var handler_iter = self.handlers.iterator();
+        while (handler_iter.next()) |entry| {
+            std.debug.print("Starting Tree: {any}\n", .{entry.key_ptr.*});
+            std.debug.print("--------------------------\n", .{});
+            try debugUrlTreesRecurse(self.allocator, entry.value_ptr, 0);
+        }
+        std.debug.print("==========================\n", .{});
     }
 
     /// runs a handler based on a request
@@ -239,6 +246,7 @@ pub const Zigzag = struct {
         var segments = try parseUrl(self.allocator, request.url);
         defer segments.deinit();
         const root_node = self.handlers.get(request.method);
+
         if (root_node) |n| {
             return self.recurseUrlTree(
                 request,
@@ -262,8 +270,7 @@ pub const Zigzag = struct {
     }
 
     fn startEventLoop(self: *Self, ip_address: [4]u8, port: u16) !void {
-        var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-        const allocator = gpa.allocator();
+        try self.debugUrlTrees();
 
         // ipv4 domain
         const domain = linux.AF.INET;
@@ -334,8 +341,8 @@ pub const Zigzag = struct {
                 if (triggered_events[i].data.fd == self.main_fd) {
                     // main socket fd triggered
                     // get the conn fd
-                    const con_addr_ptr = try allocator.create(std.net.Ip4Address);
-                    defer allocator.destroy(con_addr_ptr);
+                    const con_addr_ptr = try self.allocator.create(std.net.Ip4Address);
+                    defer self.allocator.destroy(con_addr_ptr);
                     var sock_len = con_addr_ptr.getOsSockLen();
                     const con_fd: linux.fd_t = @intCast(linux.accept(
                         self.main_fd.?,
@@ -358,8 +365,8 @@ pub const Zigzag = struct {
                 } else {
                     // receiving a request from a client
                     const con_fd = triggered_events[i].data.fd;
-                    const buf = try allocator.alloc(u8, 1000);
-                    defer allocator.free(buf);
+                    const buf = try self.allocator.alloc(u8, 1000);
+                    defer self.allocator.free(buf);
                     const req_len = linux.read(con_fd, @ptrCast(buf), buf.len);
                     if (req_len == 0) {
                         // connection closed from the server
@@ -369,7 +376,7 @@ pub const Zigzag = struct {
                     }
                     if (req_len == -1) return error.FailedToRead;
 
-                    const request = try HTTPRequest.parse(allocator, buf[0..req_len]);
+                    const request = try HTTPRequest.parse(self.allocator, buf[0..req_len]);
 
                     // Get response
                     var resp = self.runHandler(request) catch self.Response500();
