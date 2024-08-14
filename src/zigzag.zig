@@ -78,7 +78,12 @@ pub const Zigzag = struct {
     /// Maps url requests to files in a directory
     pub fn serveDir(self: *Self, comptime url: []const u8, comptime path: []const u8) !void {
         const handler = try h.dirHandler(self.allocator, path);
-        const new_url = url ++ "/*";
+        comptime var new_url: []const u8 = &.{};
+        if (url.len == 1) {
+            new_url = url ++ "*";
+        } else {
+            new_url = url ++ "/*";
+        }
         try self.assignHandler(.GET, new_url, handler);
     }
 
@@ -109,12 +114,13 @@ pub const Zigzag = struct {
     }
 
     /// Binds a given function to a given endpoint on GET request
-    pub fn GET(self: *Self, url: []const u8, comptime func: anytype) !void {
-        try self.assignHandler(.GET, url, Handler.init(self.allocator, func));
+    pub fn GET(self: *Self, comptime url: []const u8, comptime func: anytype) !void {
+        try self.assignHandler(.GET, url, Handler.init(self.allocator, url, func));
     }
 
     /// Assigns a handler to an endpoint in the URL tree
     pub fn assignHandler(self: *Self, method: Methods, url: []const u8, handler: Handler) !void {
+        std.debug.print("url: {s}\n", .{url});
         const result = try self.handlers.getOrPut(method);
         var segments = try parseUrl(self.allocator, url);
         defer segments.deinit();
@@ -133,12 +139,16 @@ pub const Zigzag = struct {
         for (1..segments.segments.items.len) |i| {
             // Loop through the segments of the endpoint
             const segment = segments.segments.items[i];
-            var child_ptr = prev_node_ptr.children.getPtr(segment.items);
+            // Check if segment is a parameter
+            const is_param = segment.items[0] == '<' and segment.items[segment.items.len - 1] == '>';
+            // Assign correct segment
+            const segment_str = if (is_param) "<param>" else segment.items;
+            var child_ptr = prev_node_ptr.children.getPtr(segment_str);
             if (child_ptr == null) {
                 // If node for the segment doesn't exist in the tree, create it
-                const new_node = try UrlNode.init(self.allocator, segment.items, null);
-                const key = try self.allocator.alloc(u8, segment.items.len);
-                @memcpy(key, segment.items);
+                const new_node = try UrlNode.init(self.allocator, segment_str, null);
+                const key = try self.allocator.alloc(u8, segment_str.len);
+                @memcpy(key, segment_str);
                 const put_result = try prev_node_ptr.children.getOrPutValue(key, new_node);
                 child_ptr = put_result.value_ptr;
             }
@@ -167,7 +177,10 @@ pub const Zigzag = struct {
         index: usize,
         cur_node_ptr: *const UrlNode,
     ) !HTTPResponse {
+        std.debug.print("cur seg {s}\n", .{cur_node_ptr.segment});
+        std.debug.print("index: {d} len: {d}\n", .{ index, segments.segments.items.len });
         if (index == segments.segments.items.len - 1) {
+            std.debug.print("last segment found\n", .{});
             // If on the last segment
             if (cur_node_ptr.handler) |handler| {
                 // If this segment is an endpoint run the handler
@@ -185,6 +198,18 @@ pub const Zigzag = struct {
                 index + 1,
                 next_node_ptr,
             );
+            if (resp.response_code == .NOT_FOUND) {
+                std.debug.print("looking for params\n", .{});
+                if (cur_node_ptr.children.getPtr("<param>")) |param_ptr| {
+                    std.debug.print("running params\n", .{});
+                    resp = try self.recurseUrlTree(
+                        request,
+                        segments,
+                        index + 1,
+                        param_ptr,
+                    );
+                }
+            }
             // If child search was not successfull and if the current segment has a fall back, call it
             if (resp.response_code == .NOT_FOUND) {
                 if (cur_node_ptr.children.getPtr("*")) |wild_ptr| {
@@ -192,6 +217,14 @@ pub const Zigzag = struct {
                 }
             }
             return resp;
+        } else if (cur_node_ptr.children.getPtr("<param>")) |param_ptr| {
+            std.debug.print("running params\n", .{});
+            return try self.recurseUrlTree(
+                request,
+                segments,
+                index + 1,
+                param_ptr,
+            );
         } else if (cur_node_ptr.children.getPtr("*")) |wild_ptr| {
             // If the segment had no children but has a fallback
             return wild_ptr.handler.?.run(request);
@@ -222,7 +255,6 @@ pub const Zigzag = struct {
         var iter = self.connections.iterator();
         while (iter.next()) |e| {
             if (std.time.timestamp() - e.value_ptr.last_request >= e.value_ptr.timeout) {
-                std.debug.print("connection timed out\n", .{});
                 _ = linux.shutdown(e.key_ptr.*, linux.SHUT.RDWR);
                 _ = self.connections.remove(e.key_ptr.*);
             }
@@ -302,7 +334,6 @@ pub const Zigzag = struct {
                 if (triggered_events[i].data.fd == self.main_fd) {
                     // main socket fd triggered
                     // get the conn fd
-                    std.debug.print("received new connection\n", .{});
                     const con_addr_ptr = try allocator.create(std.net.Ip4Address);
                     defer allocator.destroy(con_addr_ptr);
                     var sock_len = con_addr_ptr.getOsSockLen();
@@ -347,13 +378,6 @@ pub const Zigzag = struct {
 
                     const max_responses = 100;
                     // const con_timeout = 5;
-                    //
-
-                    std.debug.print("processing connection: {d}\n", .{con_fd});
-                    var debug_iter = self.connections.iterator();
-                    while (debug_iter.next()) |d| {
-                        std.debug.print("other connections, fd: {d}\n", .{d.key_ptr.*});
-                    }
 
                     if (request.headers.get("Connection")) |req_con| {
                         if (std.mem.eql(u8, req_con, "close")) {
@@ -368,7 +392,6 @@ pub const Zigzag = struct {
                                 should_close = false;
                             }
                         } else {
-                            std.debug.print("creating connection, responding with keep-alive\n", .{});
                             try self.connections.put(con_fd, Connection{
                                 .resp_count = max_responses,
                                 .timeout = 5,
@@ -391,7 +414,6 @@ pub const Zigzag = struct {
                     );
 
                     if (should_close) {
-                        std.debug.print("closing connection\n", .{});
                         _ = linux.shutdown(con_fd, linux.SHUT.RDWR);
                     }
                 }

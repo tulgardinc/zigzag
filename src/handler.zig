@@ -2,6 +2,8 @@ const std = @import("std");
 const HTTPRequest = @import("http_request.zig").HTTPRequest;
 const HTTPResponse = @import("http_response.zig").HTTPResponse;
 
+pub const PathParameters = std.StringHashMap([]const u8);
+
 pub const ContentType = enum {
     css,
     html,
@@ -18,6 +20,54 @@ pub const ContentType = enum {
     }
 };
 
+const PathParameter = struct {
+    index: usize,
+    name: []const u8,
+};
+
+fn getParameters(comptime path: []const u8) []const PathParameter {
+    comptime var parameters: []const PathParameter = &.{};
+    var start_i: i32 = 0;
+    var segment_index: usize = 0;
+    inline for (path[1..], 1..) |c, i| {
+        if (c == '<' and (path[i - 1] == '/')) {
+            start_i = i + 1;
+        }
+        if (c == '/') {
+            start_i = -1;
+            segment_index += 1;
+        }
+        if (c == '>' and start_i != -1 and (i == path.len - 1 or path[i + 1] == '/')) {
+            const param = PathParameter{
+                .index = segment_index,
+                .name = path[@intCast(start_i)..i],
+            };
+            parameters = parameters ++ .{param};
+        }
+    }
+    return parameters;
+}
+
+fn getPathParamValues(param_info: []const PathParameter, url: []const u8, result_array: [][]const u8) void {
+    var par_start: usize = 0;
+    var segment_index: usize = 0;
+    var param_index: usize = 0;
+    for (url[1..], 1..) |c, i| {
+        if (c == '/' or i == url.len - 1) {
+            if (segment_index == param_info[param_index].index) {
+                const fin_index = if (c == '/') i else i + 1;
+                result_array[param_index] = url[par_start..fin_index];
+                param_index += 1;
+                if (i == url.len - 1) return;
+            }
+            segment_index += 1;
+            if (segment_index == param_info[param_index].index) {
+                par_start = i + 1;
+            }
+        }
+    }
+}
+
 /// Wraps a function that handles an endpoint
 pub const Handler = struct {
     fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) anyerror!HTTPResponse,
@@ -25,8 +75,8 @@ pub const Handler = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, comptime func: anytype) Self {
-        const run_fn = GenRunFn(func).run;
+    pub fn init(allocator: std.mem.Allocator, comptime path: []const u8, comptime func: anytype) Self {
+        const run_fn = GenRunFn(path, func).run;
         return Self{
             .allocator = allocator,
             .fn_run_ptr = run_fn,
@@ -39,11 +89,25 @@ pub const Handler = struct {
 
     /// Generates a function that allows for the underlying endpoint function to be
     /// called without having to know it's type
-    fn GenRunFn(comptime func: anytype) type {
+    fn GenRunFn(comptime path: []const u8, comptime func: anytype) type {
         return struct {
             fn run(allocator: std.mem.Allocator, req: HTTPRequest) !HTTPResponse {
                 const args = std.meta.ArgsTuple(@TypeOf(func));
                 const fields = std.meta.fields(args);
+                const path_param_info = comptime getParameters(path);
+
+                var path_params = std.StringHashMap([]const u8).init(allocator);
+                defer path_params.deinit();
+
+                if (path_param_info.len > 0) {
+                    const path_param_values = try allocator.alloc([]const u8, path_param_info.len);
+                    defer allocator.free(path_param_values);
+                    getPathParamValues(path_param_info, req.url, path_param_values);
+
+                    for (0..path_param_values.len) |i| {
+                        try path_params.put(path_param_info[i].name, path_param_values[i]);
+                    }
+                }
 
                 comptime var arg_types: [fields.len]type = undefined;
                 inline for (fields, 0..) |f, i| {
@@ -67,6 +131,7 @@ pub const Handler = struct {
                         switch (@TypeOf(el.*)) {
                             HTTPRequest => el.* = req,
                             std.mem.Allocator => el.* = allocator,
+                            PathParameters => el.* = path_params,
                             else => unreachable,
                         }
                     }
@@ -114,7 +179,7 @@ fn GenServeFile(comptime path: []const u8) type {
 
 /// Returns a handler that serves a file
 pub fn fileHandler(allocator: std.mem.Allocator, comptime path: []const u8) Handler {
-    return Handler.init(allocator, GenServeFile(path).run);
+    return Handler.init(allocator, path, GenServeFile(path).run);
 }
 
 /// Gets the extension from a file name during comptime
@@ -198,5 +263,33 @@ fn GenServeDir(comptime path: []const u8) !type {
 /// Returns a handler that serves a directory
 pub fn dirHandler(allocator: std.mem.Allocator, comptime path: []const u8) !Handler {
     const fucntion = try GenServeDir(path);
-    return Handler.init(allocator, fucntion.run);
+    return Handler.init(allocator, path, fucntion.run);
+}
+
+test "get parameters" {
+    const params = comptime getParameters("/url/<test1>/path/<test2>/no<parm>/<no/param>");
+
+    try std.testing.expect(std.mem.eql(u8, params[0].name, "test1"));
+    try std.testing.expect(params[0].index == 1);
+    try std.testing.expect(std.mem.eql(u8, params[1].name, "test2"));
+    try std.testing.expect(params[1].index == 3);
+    try std.testing.expect(params.len == 2);
+}
+
+test "get param values" {
+    const input = "/segment/value1/second_segment/value2";
+
+    const param_info = [_]PathParameter{
+        PathParameter{ .name = "test1", .index = 1 },
+        PathParameter{ .name = "test2", .index = 3 },
+    };
+
+    const allocator = std.testing.allocator;
+    const results = try allocator.alloc([]const u8, 2);
+    defer allocator.free(results);
+
+    getPathParamValues(&param_info, input, results);
+
+    try std.testing.expect(std.mem.eql(u8, results[0], "value1"));
+    try std.testing.expect(std.mem.eql(u8, results[1], "value2"));
 }
