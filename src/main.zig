@@ -21,7 +21,7 @@ pub fn main() !void {
 
     try zag.serveFile("/", "../public/index.html");
     try zag.serveDir("/", "../public");
-    try zag.GET("/api/<test>/<second>", handleGet);
+    try zag.addEndpoint(.POST, "/api/<test>/<second>", handleGet);
 
     try zag.start(.{ 127, 0, 0, 1 }, 8080);
 }

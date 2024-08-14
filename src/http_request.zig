@@ -3,6 +3,14 @@ const std = @import("std");
 /// Request methods
 pub const Methods = enum {
     GET,
+    HEAD,
+    POST,
+    PUT,
+    DELETE,
+    CONNECT,
+    OPTIONS,
+    TRACE,
+    PATCH,
 };
 
 /// Represents an HTTP request from the client

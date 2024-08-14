@@ -113,9 +113,9 @@ pub const Zigzag = struct {
         return segments;
     }
 
-    /// Binds a given function to a given endpoint on GET request
-    pub fn GET(self: *Self, comptime url: []const u8, comptime func: anytype) !void {
-        try self.assignHandler(.GET, url, Handler.init(self.allocator, url, func));
+    /// Binds a given function to a given endpoint on provided request
+    pub fn addEndpoint(self: *Self, method: Methods, comptime url: []const u8, comptime func: anytype) !void {
+        try self.assignHandler(method, url, Handler.init(self.allocator, url, func));
     }
 
     /// Assigns a handler to an endpoint in the URL tree
@@ -222,7 +222,13 @@ pub const Zigzag = struct {
         const padding = try allocator.alloc(u8, depth * 4);
         defer allocator.free(padding);
         @memset(padding, ' ');
-        std.debug.print("{s}- {s}\n", .{ padding, node.segment });
+        var handler: []const u8 = undefined;
+        if (node.handler != null) {
+            handler = " (f)";
+        } else {
+            handler = &.{};
+        }
+        std.debug.print("{s}- {s}{s}\n", .{ padding, node.segment, handler });
 
         var child_iter = node.children.valueIterator();
         while (child_iter.next()) |child| {
@@ -446,7 +452,6 @@ test "url tree" {
     var zag = Zigzag.init(allocator);
     defer zag.deinit();
 
-    //try zag.GET("/", handleGet);
     try zag.serveFile("/", "../public/index.html");
     try zag.serveFile("/style.css", "../public/style.css");
 
