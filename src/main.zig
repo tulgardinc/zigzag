@@ -3,13 +3,10 @@ const Zigzag = @import("zigzag.zig").Zigzag;
 const HTTPResponse = @import("http_response.zig").HTTPResponse;
 const PathParameters = @import("handler.zig").PathParameters;
 
-fn handleGet(allocator: std.mem.Allocator, path_params: PathParameters) !HTTPResponse {
+fn handleGet(allocator: std.mem.Allocator, path_params: PathParameters) ![]const u8 {
     const str = path_params.get("test").?;
     const str2 = path_params.get("second").?;
-    const header = try std.fmt.allocPrint(allocator, "<h1>{s}</h1><h2>{s}</h2>", .{ str, str2 });
-    var resp = HTTPResponse.init(allocator, 200, header);
-    try resp.headers.put("Content-Type", "text/html");
-    return resp;
+    return try std.fmt.allocPrint(allocator, "<h1>{s}</h1><h2>{s}</h2>", .{ str, str2 });
 }
 
 pub fn main() !void {

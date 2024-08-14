@@ -12,10 +12,10 @@ pub const ContentType = enum {
 
     pub fn getString(self: ContentType) []const u8 {
         return switch (self) {
-            .css => "text/css; charset=UTF-8",
-            .html => "text/html; charset=UTF-8",
-            .js => "text/js; charset=UTF-8",
-            .plain => "text/plain; charset=UTF-8",
+            .css => "text/css",
+            .html => "text/html",
+            .js => "text/js",
+            .plain => "text/plain",
         };
     }
 };
@@ -23,6 +23,11 @@ pub const ContentType = enum {
 const PathParameter = struct {
     index: usize,
     name: []const u8,
+};
+
+pub const EndpointReturnUnion = union(enum) {
+    string: []const u8,
+    http_response: HTTPResponse,
 };
 
 fn getParameters(comptime path: []const u8) []const PathParameter {
@@ -70,7 +75,7 @@ fn getPathParamValues(param_info: []const PathParameter, url: []const u8, result
 
 /// Wraps a function that handles an endpoint
 pub const Handler = struct {
-    fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) anyerror!HTTPResponse,
+    fn_run_ptr: *const fn (std.mem.Allocator, HTTPRequest) anyerror!EndpointReturnUnion,
     allocator: std.mem.Allocator,
 
     const Self = @This();
@@ -83,7 +88,7 @@ pub const Handler = struct {
         };
     }
 
-    pub fn run(self: Self, request: HTTPRequest) !HTTPResponse {
+    pub fn run(self: Self, request: HTTPRequest) !EndpointReturnUnion {
         return try self.fn_run_ptr(self.allocator, request);
     }
 
@@ -91,7 +96,7 @@ pub const Handler = struct {
     /// called without having to know it's type
     fn GenRunFn(comptime path: []const u8, comptime func: anytype) type {
         return struct {
-            fn run(allocator: std.mem.Allocator, req: HTTPRequest) !HTTPResponse {
+            fn run(allocator: std.mem.Allocator, req: HTTPRequest) !EndpointReturnUnion {
                 const args = std.meta.ArgsTuple(@TypeOf(func));
                 const fields = std.meta.fields(args);
                 const path_param_info = comptime getParameters(path);
@@ -118,12 +123,18 @@ pub const Handler = struct {
                 const ret_type = func_info.Fn.return_type;
                 const ret_info = @typeInfo(ret_type.?);
 
+                comptime var CallOutputType: type = ret_type.?;
+                if (ret_info == .ErrorUnion) {
+                    CallOutputType = ret_info.ErrorUnion.payload;
+                }
+
                 // the http response
-                var resp: HTTPResponse = undefined;
+                var resp: EndpointReturnUnion = undefined;
+                var call_output: CallOutputType = undefined;
+                var immidiate_return: ret_type.? = undefined;
                 if (fields.len == 0) {
                     // if the function takes no arguments, just call it.
-                    const ret = func();
-                    resp = ret;
+                    immidiate_return = func();
                 } else {
                     // otherwise fill the arguments/injections
                     var args_tuple: std.meta.Tuple(&arg_types) = undefined;
@@ -132,17 +143,24 @@ pub const Handler = struct {
                             HTTPRequest => el.* = req,
                             std.mem.Allocator => el.* = allocator,
                             PathParameters => el.* = path_params,
-                            else => unreachable,
+                            else => @compileError("Wrong type in the endpoint handler parameters"),
                         }
                     }
                     // call the function
-                    const ret = @call(.auto, func, args_tuple);
-                    // handle it if there is an error
-                    if (ret_info == .ErrorUnion) {
-                        resp = try ret;
-                    } else {
-                        resp = ret;
-                    }
+                    immidiate_return = @call(.auto, func, args_tuple);
+                }
+
+                // handle it if there is an error
+                if (ret_info == .ErrorUnion) {
+                    call_output = try immidiate_return;
+                } else {
+                    call_output = immidiate_return;
+                }
+
+                switch (@TypeOf(call_output)) {
+                    []const u8 => resp = EndpointReturnUnion{ .string = call_output },
+                    HTTPResponse => resp = EndpointReturnUnion{ .http_response = call_output },
+                    else => std.debug.print("{any}", .{@TypeOf(call_output)}),
                 }
 
                 return resp;

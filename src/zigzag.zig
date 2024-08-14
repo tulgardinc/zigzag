@@ -4,8 +4,8 @@ const errno = std.posix.errno;
 const HTTPRequest = @import("http_request.zig").HTTPRequest;
 const Methods = @import("http_request.zig").Methods;
 const HTTPResponse = @import("http_response.zig").HTTPResponse;
-const ResponseCode = @import("http_response.zig").ResponseCode;
 const Handler = @import("handler.zig").Handler;
+const EndpointReturnUnion = @import("handler.zig").EndpointReturnUnion;
 const h = @import("handler.zig");
 const UrlNode = @import("url_tree.zig").UrlNode;
 const UrlSegments = @import("url_tree.zig").UrlSegments;
@@ -159,14 +159,11 @@ pub const Zigzag = struct {
         }
     }
 
-    /// Helper function to return error 404
-    pub fn Response404(self: *Self) HTTPResponse {
-        return HTTPResponse.init(self.allocator, 404, "");
-    }
-
-    /// Helper function to return error 500
-    pub fn Response500(self: *Self) HTTPResponse {
-        return HTTPResponse.init(self.allocator, 500, "");
+    /// Helper function to quickly generate a response with code (mostly to return errors)
+    pub fn Respond(self: *Self, code: usize) EndpointReturnUnion {
+        return EndpointReturnUnion{
+            .http_response = HTTPResponse.init(self.allocator, code, ""),
+        };
     }
 
     /// Recursively go through the URL tree and call the specified handler in the request
@@ -176,7 +173,7 @@ pub const Zigzag = struct {
         segments: *const UrlSegments,
         index: usize,
         cur_node_ptr: *const UrlNode,
-    ) !HTTPResponse {
+    ) !EndpointReturnUnion {
         if (index == segments.segments.items.len - 1) {
             // If on the last segment
             if (cur_node_ptr.handler) |handler| {
@@ -184,7 +181,7 @@ pub const Zigzag = struct {
                 return try handler.run(request);
             }
             // If the segment is not an endpoint then 404
-            return self.Response404();
+            return self.Respond(404);
         }
         const next_segment = segments.segments.items[index + 1];
         if (cur_node_ptr.children.getPtr(next_segment.items)) |next_node_ptr| {
@@ -195,7 +192,7 @@ pub const Zigzag = struct {
                 index + 1,
                 next_node_ptr,
             );
-            if (resp.response_code != 404) {
+            if (resp == .string or (resp == .http_response and resp.http_response.response_code != 404)) {
                 return resp;
             }
         }
@@ -206,7 +203,7 @@ pub const Zigzag = struct {
                 index + 1,
                 param_ptr,
             );
-            if (resp.response_code != 404) {
+            if (resp == .string or (resp == .http_response and resp.http_response.response_code != 404)) {
                 return resp;
             }
         }
@@ -215,7 +212,7 @@ pub const Zigzag = struct {
             return wild_ptr.handler.?.run(request);
         }
         std.debug.print("segment {s} found 404\n", .{cur_node_ptr.segment});
-        return self.Response404();
+        return self.Respond(404);
     }
 
     fn debugUrlTreesRecurse(allocator: std.mem.Allocator, node: *const UrlNode, depth: usize) !void {
@@ -254,15 +251,22 @@ pub const Zigzag = struct {
         const root_node = self.handlers.get(request.method);
 
         if (root_node) |n| {
-            return self.recurseUrlTree(
+            const resp = try self.recurseUrlTree(
                 request,
                 &segments,
                 0,
                 &n,
             );
+            switch (resp) {
+                .http_response => |r| return r,
+                .string => |body| {
+                    var new_resp = HTTPResponse.init(self.allocator, 200, body);
+                    try new_resp.headers.put("Content-Type", "text/html; charset=UTF-8");
+                    return new_resp;
+                },
+            }
         }
-        // METHOD NOT SUPPORTED IMPLEMENT
-        return self.Response404();
+        return self.Respond(404).http_response;
     }
 
     fn handleActiveConnections(self: *Self) void {
@@ -385,7 +389,7 @@ pub const Zigzag = struct {
                     const request = try HTTPRequest.parse(self.allocator, buf[0..req_len]);
 
                     // Get response
-                    var resp = self.runHandler(request) catch self.Response500();
+                    var resp = self.runHandler(request) catch self.Respond(500).http_response;
 
                     var should_close = true;
 
