@@ -168,7 +168,7 @@ fn GenServeFile(comptime path: []const u8) type {
 
             _ = try file.readAll(buffer);
 
-            var resp = HTTPResponse.init(allocator, .OK, buffer);
+            var resp = HTTPResponse.init(allocator, 200, buffer);
             // Get the content type from the file extension
             const content_type = std.meta.stringToEnum(ContentType, extension) orelse .plain;
             try resp.headers.put("Content-Type", content_type.getString());
@@ -234,7 +234,7 @@ fn GenServeDir(comptime path: []const u8) !type {
             const full_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ path, request.url });
             defer allocator.free(full_path);
 
-            const normalized_request_path = std.fs.realpathAlloc(allocator, full_path) catch return HTTPResponse.init(allocator, .NOT_FOUND, "");
+            const normalized_request_path = std.fs.realpathAlloc(allocator, full_path) catch return HTTPResponse.init(allocator, 404, "");
             defer allocator.free(normalized_request_path);
 
             if (!std.mem.startsWith(u8, normalized_request_path, normalized_path)) return error.WrongPath;
@@ -251,7 +251,7 @@ fn GenServeDir(comptime path: []const u8) !type {
 
             _ = try file.readAll(buffer);
 
-            var resp = HTTPResponse.init(allocator, .OK, buffer);
+            var resp = HTTPResponse.init(allocator, 200, buffer);
             // Get the content type from the file extension
             const content_type = std.meta.stringToEnum(ContentType, extension.items) orelse .plain;
             try resp.headers.put("Content-Type", content_type.getString());

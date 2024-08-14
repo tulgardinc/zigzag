@@ -161,12 +161,12 @@ pub const Zigzag = struct {
 
     /// Helper function to return error 404
     pub fn Response404(self: *Self) HTTPResponse {
-        return HTTPResponse.init(self.allocator, .NOT_FOUND, "");
+        return HTTPResponse.init(self.allocator, 404, "");
     }
 
     /// Helper function to return error 500
     pub fn Response500(self: *Self) HTTPResponse {
-        return HTTPResponse.init(self.allocator, .INTERNAL_SERVER_ERROR, "");
+        return HTTPResponse.init(self.allocator, 500, "");
     }
 
     /// Recursively go through the URL tree and call the specified handler in the request
@@ -195,7 +195,7 @@ pub const Zigzag = struct {
                 index + 1,
                 next_node_ptr,
             );
-            if (resp.response_code != .NOT_FOUND) {
+            if (resp.response_code != 404) {
                 return resp;
             }
         }
@@ -206,7 +206,7 @@ pub const Zigzag = struct {
                 index + 1,
                 param_ptr,
             );
-            if (resp.response_code != .NOT_FOUND) {
+            if (resp.response_code != 404) {
                 return resp;
             }
         }

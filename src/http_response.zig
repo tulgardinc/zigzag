@@ -1,32 +1,15 @@
 const std = @import("std");
 
-/// Response code for an HTTP response
-pub const ResponseCode = enum(usize) {
-    OK = 200,
-    NOT_FOUND = 404,
-    METHOD_NOT_ALLOWED = 405,
-    INTERNAL_SERVER_ERROR = 500,
-
-    pub fn getString(self: ResponseCode) []const u8 {
-        return switch (self) {
-            .OK => "OK",
-            .NOT_FOUND => "PAGE NOT FOUND",
-            .METHOD_NOT_ALLOWED => "METHOD NOT ALLOWED",
-            .INTERNAL_SERVER_ERROR => "INTERNAL SERVER ERROR",
-        };
-    }
-};
-
 /// Represents an HTTP response from the server
 pub const HTTPResponse = struct {
-    response_code: ResponseCode,
+    response_code: usize,
     headers: std.StringHashMap([]const u8),
     body: []const u8,
     allocator: std.mem.Allocator,
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, code: ResponseCode, body: []const u8) Self {
+    pub fn init(allocator: std.mem.Allocator, code: usize, body: []const u8) Self {
         return Self{
             .response_code = code,
             .headers = std.StringHashMap([]const u8).init(allocator),
@@ -45,12 +28,7 @@ pub const HTTPResponse = struct {
         var buffer = std.ArrayList(u8).init(self.allocator);
         const writer = buffer.writer();
 
-        try writer.print(
-            "HTTP/1.1 {d} {s}\n",
-            .{
-                @intFromEnum(self.response_code), self.response_code.getString(),
-            },
-        );
+        try writer.print("HTTP/1.1 {d}\n", .{self.response_code});
 
         try writer.print(
             "Content-Length: {d}\n",

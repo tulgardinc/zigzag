@@ -7,7 +7,7 @@ fn handleGet(allocator: std.mem.Allocator, path_params: PathParameters) !HTTPRes
     const str = path_params.get("test").?;
     const str2 = path_params.get("second").?;
     const header = try std.fmt.allocPrint(allocator, "<h1>{s}</h1><h2>{s}</h2>", .{ str, str2 });
-    var resp = HTTPResponse.init(allocator, .OK, header);
+    var resp = HTTPResponse.init(allocator, 200, header);
     try resp.headers.put("Content-Type", "text/html");
     return resp;
 }
