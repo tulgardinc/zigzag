@@ -13,7 +13,7 @@ Currently a toy project and insecure.
 - [ ] Support state injection to endpoints
 - [x] Support path parameters
     - [ ] Creaet a comptime struct for path parameters (currently uses string hash map)
-- [ ] Support for all response codes
+- [x] Support for all response codes
 - [ ] Allow string to be returned from endpoints
 - [ ] Automatically configure headers for the response
 - [ ] Support compression
